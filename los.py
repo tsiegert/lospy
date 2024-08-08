@@ -125,7 +125,97 @@ class los(object):
         self._dOmega = deg2rad((np.sin(self._THETA_ARR + deg2rad(self._pixelsize/2)) - np.sin(self._THETA_ARR - deg2rad(self._pixelsize/2))) * self._pixelsize)
 
 
-    
+    def save_image_to_fits(self,filename='saved_los_image.fits',overwrite=False,author='lospy user',comments=[]):
+        """
+            Saves the resulting image to a fits file.
+        """
+        # importing new as things might get overwritten somewhere
+        from astropy import wcs
+        import datetime
+        from astropy.io import fits
+
+        # defining output filename and header comments
+        self._filename = filename
+        self._overwrite = overwrite
+        self._comments = comments
+        self._author = author
+        
+        # creating WCS object
+        wcs = wcs.WCS(naxis=2)
+        nx = self._PHI_ARR.shape[1]
+        ny = self._THETA_ARR.shape[0]
+        pixscalelon = self._pixelsize # cdelt1
+        pixscalelat = self._pixelsize  # cdelt2
+
+        # defining reference pixel
+        idx_l_select = int(nx/2)
+        idx_b_select = int(ny/2)
+
+        # required header information
+        wcs.wcs.crpix = [idx_l_select+0.5,idx_b_select+0.5] # Ref pixel for axis 1 and 2
+        # the 0.5 is important so that the map fits the coordinate grid!!!
+        wcs.wcs.cdelt = np.array([pixscalelon, pixscalelat]) # what is the pixel scale in lon, lat.
+        wcs.wcs.crval = [self._PHI_ARRg[0,idx_l_select],self._THETA_ARRg[idx_b_select,0]]  #what is the galactic coordinate of that pixel.
+        wcs.wcs.ctype = ["GLON-CAR", "GLAT-CAR"] #CAR projection #AIT projection
+
+        # date of creating the fits file
+        today = datetime.date.today()
+
+        # author of the file
+        header = wcs.to_header()
+        header['history'] = self._author+" created this file on "+str(today)+" " 
+        header['EXTNAME'] = "IMAGE"
+
+        # total flux in iamge
+        total_flux = self.flux
+        header['FLUX'] = str(total_flux)
+        #header['FLUXUNIT'] = str(flux_unit).strip('/'+str(dOmega_unit)) # not yet implemented to have units
+        #header['DOMEGA'] = dOmega_unit
+        #header['PIX_UNIT'] = pixel_unit
+
+        # adding comments in header
+        for comment in comments:
+            header['COMMENT'] = comment
+
+        # define header
+        hdu_image = fits.ImageHDU(self._image,header=header)
+            
+        # define auxiliary things
+        lon_bounds_header = fits.Header()
+        lon_bounds_header['EXTNAME'] = 'LON_BNDS'
+        longitude_boundaries = fits.ImageHDU(data=self._PHI_ARRg,header=lon_bounds_header)
+        
+        lat_bounds_header = fits.Header()
+        lat_bounds_header['EXTNAME'] = 'LAT_BNDS'
+        latitude_boundaries = fits.ImageHDU(data=self._THETA_ARRg,header=lat_bounds_header)
+            
+        lon_cen_header = fits.Header()
+        lon_cen_header['EXTNAME'] = 'LON_CENT'
+        longitude_centers = fits.ImageHDU(data=self._PHI_ARR,header=lon_cen_header)
+            
+        lat_cen_header = fits.Header()
+        lat_cen_header['EXTNAME'] = 'LAT_CENT'
+        latitude_centers = fits.ImageHDU(data=self._THETA_ARR,header=lat_cen_header)
+            
+        # define pixel solid angle areas
+        dOmega_header = fits.Header()
+        dOmega_header['EXTNAME'] = 'D_OMEGA'
+        dOmega_values = fits.ImageHDU(data=self._dOmega,header=dOmega_header)
+
+        # primary header (no info)
+        primary_hdu = fits.PrimaryHDU()
+            
+        # list of entries
+        hdul = fits.HDUList([primary_hdu,
+                             hdu_image,
+                             longitude_boundaries,
+                             latitude_boundaries,
+                             longitude_centers,
+                             latitude_centers,
+                             dOmega_values])
+            
+        # save file
+        hdul.writeto(filename, overwrite=overwrite)
         
 
     def density_function(self):
@@ -177,7 +267,7 @@ class los(object):
         self._luminosity = np.sum(self._luminosity_image_integrated)
         
         
-    def plot_source(self,projection=None,luminosity_flag=False,integrated=False,**kwargs):
+    def plot_source(self,projection=None,luminosity_flag=False,integrated=False,cbar_label=None,**kwargs):
         """
         Plot the los-integrated object with or without projection.
         """
@@ -217,11 +307,14 @@ class los(object):
 
                 plot_image = self._luminosity_image_integrated
             
-        
+        if projection == None:
+            pass
+        else:
+            plot_image = np.flip(plot_image,axis=1)
+                
         plt.pcolormesh(self._PHI_ARRg*r2d,
                        self._THETA_ARRg*r2d,
-                       np.flip(plot_image,axis=1),
-                       #plot_image,
+                       plot_image,
                        **kwargs)
 
         cbar = plt.colorbar(orientation='horizontal')
@@ -229,7 +322,11 @@ class los(object):
         #if self._spectrum != {}:
         #    cbar.set_label(label='Flux ({0}-{1} MeV) '.format(self._emin,self._emax)+r'$[10^{{ {0} }}$'.format(np.int(o))+r'$\,\mathrm{ph\,cm^{-2}\,s^{-1}\,sr^{-1}}$]',fontsize=20)
         #else:
-        cbar.set_label(label='Flux [arbitrary units]',fontsize=20)
+        if cbar_label != None:
+            cbar.set_label(label=cbar_label,fontsize=20)
+        else:
+            cbar.set_label(label='Flux [arbitrary units]',fontsize=20)
+
 
         if projection != None:
         
@@ -582,6 +679,13 @@ class los(object):
 
         #F2 = F1 * L2 / L1
 
+
+
+    def __add__(self,other):
+
+        new_image = self._image + other._image
+
+        return new_image
     
     
 #############################################
@@ -1365,7 +1469,7 @@ class Spherical_Shell(los):
 
         self.nls = None
 
-    def density_function(self,_x,_y,_z,**kwargs):
+    def density_function(self,_x,_y,_z,luminosity_flag=False,**kwargs):
         
         Ri = kwargs.pop('Ri')
         Ro = kwargs.pop('Ro')
@@ -1373,18 +1477,23 @@ class Spherical_Shell(los):
         xT = kwargs.pop('xT')
         yT = kwargs.pop('yT')
         zT = kwargs.pop('zT')
+
+        rho0 = kwargs.pop('rho0')
+        
+        self._params = [xT,yT,zT,Ri,Ro]
+        self._amplitude = rho0
         
         shell = Spherical_Shell_Solid(self._PHI_ARR,
                                       self._THETA_ARR,
                                       _x,_y,_z,
-                                      xT,yT,zT,
-                                      Ri,Ro)
+                                      *self._params,
+                                      luminosity_flag)
 
-        rho0 = kwargs.pop('rho0')
-        
-        return rho0*shell
+        return self._amplitude*shell
 
+    def luminosity_function(self,_x,_y,_z,luminosity_flag=True,**kwargs):
 
+        return self.density_function(_x,_y,_z,luminosity_flag=luminosity_flag,**kwargs)
 
 
 
@@ -1640,9 +1749,9 @@ class Freudenreich98_Bulge(los):
         barHEnd = 0.461
         
         # Galactic centre
-        xT = 8.179 # kpc
+        xT = 8.5 # kpc
         yT = 0
-        zT = 0.019 # kpc
+        zT = 0.01646 # kpc
 
         #
         self._params = [xT,yT,zT,phi,theta,barX,barY,barZ,barPerp,barPara,barREnd,barHEnd]
@@ -1663,6 +1772,219 @@ class Freudenreich98_Bulge(los):
 
         return self.density_function(_x,_y,_z,luminosity_flag=luminosity_flag,**kwargs)
     
+
+
+class Launhardt02_NSC(los):
+    """
+    Launhardt+2002 Nuclear Stellar Cluster
+    """
+
+    def __init__(self,**kwargs):
+        
+        super().__init__(**kwargs)
+        
+        self.name = 'Launhardt02_NSC'
+
+        self.nls = num_los_setup(smin=8.183-2,
+                                 smax=8.183+2,
+                                 n_los_steps=400,
+                                 lmin=self._phi_min,
+                                 lmax=self._phi_max,
+                                 bmin=self._theta_min,
+                                 bmax=self._theta_max,
+                                 pixelsize=self._pixelsize)
+
+
+        phi = 13.97
+        theta = 0
+
+        rho0 = 3.3e6
+        rho1 = 89.88e6
+
+        R0 = 0.00022
+        Rin = 0.006
+        Rout = 0.2
+        
+        # Galactic centre
+        xT = 8.183 # kpc
+        yT = 0
+        zT = 0.01646 # kpc
+
+        #
+        self._params = [xT,yT,zT,phi,theta,rho0,rho1,R0,Rin,Rout]
+        
+    def density_function(self,_x,_y,_z,luminosity_flag=False,**kwargs):
+        
+        nsc = Nuclear_Stellar_Cluster_function(self.nls._grid_s,
+                                               self.nls._grid_b,
+                                               self.nls._grid_l,
+                                               self.nls._ds,
+                                               _x,_y,_z,
+                                               *self._params,
+                                               luminosity_flag)
+        
+        return nsc
+
+    def luminosity_function(self,_x,_y,_z,luminosity_flag=True,**kwargs):
+
+        return self.density_function(_x,_y,_z,luminosity_flag=luminosity_flag,**kwargs)
+
+
+
+class Launhardt02_NSD(los):
+    """
+    Launhardt+2002 Nuclear Stellar Disk
+    """
+
+    def __init__(self,**kwargs):
+        
+        super().__init__(**kwargs)
+        
+        self.name = 'Launhardt02_NSD'
+
+        self.nls = num_los_setup(smin=8.183-2,
+                                 smax=8.183+2,
+                                 n_los_steps=400,
+                                 lmin=self._phi_min,
+                                 lmax=self._phi_max,
+                                 bmin=self._theta_min,
+                                 bmax=self._theta_max,
+                                 pixelsize=self._pixelsize)
+
+
+        phi = 13.97
+        theta = 0
+
+        rho0 = 301.
+        rho1 = 11.73e6
+        rho2 = 5.94e24
+
+        R0 = 0.001        
+        Rin = 0.12
+        Rout = 0.22
+        Rmax = 0.5
+
+        zscl = 0.030
+
+        # define cuts in R and z to be more conform with NB template
+        Rscut = 0.35
+        zcut = 0.35
+        
+        # Galactic centre
+        xT = 8.183 # kpc
+        yT = 0
+        zT = 0.01646 # kpc
+
+        #
+        self._params = [xT,yT,zT,phi,theta,rho0,rho1,rho2,R0,Rin,Rout,Rmax,zscl,Rscut,zcut]
+        
+    def density_function(self,_x,_y,_z,luminosity_flag=False,**kwargs):
+        
+        nsd = Nuclear_Stellar_Disk_function(self.nls._grid_s,
+                                            self.nls._grid_b,
+                                            self.nls._grid_l,
+                                            self.nls._ds,
+                                            _x,_y,_z,
+                                            *self._params,
+                                            luminosity_flag)
+        
+        return nsd
+
+    def luminosity_function(self,_x,_y,_z,luminosity_flag=True,**kwargs):
+
+        return self.density_function(_x,_y,_z,luminosity_flag=luminosity_flag,**kwargs)
+
+
+
+class NuclearBulge(los):
+    """
+    Launhardt+2002 Nuclear Stellar Cluster + Disk
+    """
+
+    def __init__(self,**kwargs):
+        
+        super().__init__(**kwargs)
+        
+        self.name = 'NuclearBulge'
+
+        self.nls = num_los_setup(smin=8.183-2,
+                                 smax=8.183+2,
+                                 n_los_steps=400,
+                                 lmin=self._phi_min,
+                                 lmax=self._phi_max,
+                                 bmin=self._theta_min,
+                                 bmax=self._theta_max,
+                                 pixelsize=self._pixelsize)
+
+
+        phi = 13.97
+        theta = 0
+
+        # NSD parameters
+        nsd_rho0 = 301.
+        nsd_rho1 = 11.73e6
+        nsd_rho2 = 5.94e24
+
+        nsd_R0 = 0.001        
+        nsd_Rin = 0.12
+        nsd_Rout = 0.22
+        nsd_Rmax = 0.5
+
+        nsd_zscl = 0.030
+
+        # define cuts in R and z to be more conform with NB template
+        nsd_Rscut = 0.35
+        nsd_zcut = 0.35
+
+        # NSC parameters
+        nsc_rho0 = 3.3e6
+        nsc_rho1 = 89.88e6
+
+        nsc_R0 = 0.00022
+        nsc_Rin = 0.006
+        nsc_Rout = 0.2
+
+        # Galactic centre
+        xT = 8.183 # kpc
+        yT = 0
+        zT = 0.01646 # kpc
+
+        #
+        self._params_nsd = [xT,yT,zT,phi,theta,nsd_rho0,nsd_rho1,nsd_rho2,nsd_R0,nsd_Rin,nsd_Rout,nsd_Rmax,nsd_zscl,nsd_Rscut,nsd_zcut]
+        self._params_nsc = [xT,yT,zT,phi,theta,nsc_rho0,nsc_rho1,nsc_R0,nsc_Rin,nsc_Rout]
+        
+        
+    def density_function(self,_x,_y,_z,luminosity_flag=False,**kwargs):
+        
+        nsd = Nuclear_Stellar_Disk_function(self.nls._grid_s,
+                                            self.nls._grid_b,
+                                            self.nls._grid_l,
+                                            self.nls._ds,
+                                            _x,_y,_z,
+                                            *self._params_nsd,
+                                            luminosity_flag)
+        
+        nsc = Nuclear_Stellar_Cluster_function(self.nls._grid_s,
+                                               self.nls._grid_b,
+                                               self.nls._grid_l,
+                                               self.nls._ds,
+                                               _x,_y,_z,
+                                               *self._params_nsc,
+                                               luminosity_flag)
+
+        
+        
+        return nsd+nsc
+
+    def luminosity_function(self,_x,_y,_z,luminosity_flag=True,**kwargs):
+
+        return self.density_function(_x,_y,_z,luminosity_flag=luminosity_flag,**kwargs)
+
+
+
+
+    
+
 
 
 

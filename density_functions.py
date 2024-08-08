@@ -218,11 +218,13 @@ def Solid_Torus(phi: np.ndarray,theta: np.ndarray,
 @nb.njit(float64[:,:](float64[:,:],float64[:,:],
                       float64,float64,float64,
                       float64,float64,float64,
-                      float64,float64),parallel=True)
+                      float64,float64,
+                      bool_),parallel=True)
 def Spherical_Shell_Solid(phi: np.ndarray, theta: np.ndarray,
                           x0: float, y0: float, z0: float,
                           xT: float, yT: float, zT: float,
-                          Ri: float, Ro: float):
+                          Ri: float, Ro: float,
+                          luminosity_flag: bool):
 
     print(x0,y0,z0,xT,yT,zT)
     
@@ -311,10 +313,21 @@ def Spherical_Shell_Solid(phi: np.ndarray, theta: np.ndarray,
         
         print('case not included, yet')
         return(np.zeros(p0.shape))
-    
-    dF = (ds_o - ds_i)
 
-    return(dF)
+
+    if luminosity_flag == False:
+
+        # for map integration
+        dF = (ds_o - ds_i)
+        val = dF
+
+    else:
+
+        # for luminosity integration
+        dL = 1/3*(ds_o**3 - ds_i**3)
+        val = dL
+    
+    return(val)
 
 
 
@@ -388,15 +401,23 @@ def Tilted_Ellipsoid_general(s: np.ndarray, b: np.ndarray, l: np.ndarray,
 
     deg2rad = pi/180.
 
+    phi = -phi*deg2rad
+    
     # los vector
-    x = x0 + s*cos(deg2rad*l)*cos(deg2rad*b)
-    y = y0 + s*sin(deg2rad*l)*cos(deg2rad*b)
-    z = z0 + s*sin(deg2rad*b)
+    x = xT - s*cos(deg2rad*l)*cos(deg2rad*b)
+    y = yT - s*sin(deg2rad*l)*cos(deg2rad*b)
+    z = zT - s*sin(deg2rad*b)
 
     # rotated variables (might nned to be x-xT, etc.)
-    xp = cos(phi)*cos(theta)*(x-xT) + sin(phi)*(y-yT) - cos(phi)*sin(theta)*(z-zT)
-    yp = -sin(phi)*cos(theta)*(x-xT) + cos(phi)*(y-yT) + sin(phi)*sin(theta)*(z-zT)
-    zp = sin(theta)*(x-xT) + cos(theta)*(z-zT)    
+    #xp = cos(phi)*cos(theta)*(x-xT) + sin(phi)*(y-yT) - cos(phi)*sin(theta)*(z-zT)
+    #yp = -sin(phi)*cos(theta)*(x-xT) + cos(phi)*(y-yT) + sin(phi)*sin(theta)*(z-zT)
+    #zp = sin(theta)*(x-xT) + cos(theta)*(z-zT)    
+
+    # correct trafo?
+    xp = cos(phi)*cos(theta)*x + sin(phi)*y - cos(phi)*sin(theta)*z
+    yp = -sin(phi)*cos(theta)*x + cos(phi)*y + sin(phi)*sin(theta)*z
+    zp = sin(theta)*x + cos(theta)*z
+
     
     # shapes
     rPerp = ((fabs(xp)/barX)**barPerp + (fabs(yp)/barY)**barPerp)**(1/barPerp)
@@ -435,4 +456,230 @@ def Tilted_Ellipsoid_general(s: np.ndarray, b: np.ndarray, l: np.ndarray,
     val = np.sum(bar_map_slices*ds,axis=0)
 
     return(val)
+
+
+
+@nb.njit(float64[:,:](float64[:,:,:],float64[:,:,:],float64[:,:,:],
+                      float64,
+                      float64,float64,float64,
+                      float64,float64,float64,
+                      float64,float64,
+                      float64,float64,
+                      float64,float64,float64,
+                      bool_),fastmath=True,parallel=True)
+def _Nuclear_Stellar_Cluster_function(s: np.ndarray, b: np.ndarray, l: np.ndarray,
+                                      ds: float,
+                                      x0: float, y0: float, z0: float,
+                                      xT: float, yT: float, zT: float,
+                                      phi: float, theta: float,
+                                      rho0: float, rho1: float,
+                                      R0: float, Rin: float, Rout: float,
+                                      luminosity_flag: bool):
+
+    deg2rad = pi/180.
+
+    phi = -phi*deg2rad
+    
+    # los vector
+    x = xT - s*cos(deg2rad*l)*cos(deg2rad*b)
+    y = yT - s*sin(deg2rad*l)*cos(deg2rad*b)
+    z = zT - s*sin(deg2rad*b)
+
+    # correct trafo?
+    xp = cos(phi)*cos(theta)*x + sin(phi)*y - cos(phi)*sin(theta)*z
+    yp = -sin(phi)*cos(theta)*x + cos(phi)*y + sin(phi)*sin(theta)*z
+    zp = sin(theta)*x + cos(theta)*z
+
+    Rp = sqrt(xp**2+yp**2+zp**2)
+
+    # init empty val array
+    dims = s.shape
+    nsc_slices = zeros(dims)
+
+    # need to loop over all entries
+    for i_s in range(dims[0]):
+        for i_b in range(dims[1]):
+            for i_l in range(dims[2]):
+                
+                # inside and outside
+                if Rp[i_s,i_b,i_l] <= Rin:
+                    nsc_slices[i_s,i_b,i_l] = rho0/(1+(Rp[i_s,i_b,i_l]/R0)**2)
+
+                elif (Rp[i_s,i_b,i_l] > Rin) & (Rp[i_s,i_b,i_l] <= Rout):
+                    nsc_slices[i_s,i_b,i_l] = rho1/(1+(Rp[i_s,i_b,i_l]/R0)**3)
+
+                else:
+                    nsc_slices[i_s,i_b,i_l] = 0.
+
+    
+    # flux or luminosity
+    if luminosity_flag == False:
+
+        # for map integration
+        nsc_map_slices = nsc_slices
+
+    else:
+
+        # for luminosity integration
+        nsc_map_slices = nsc_slices * s**2
+
+    # los
+    val = np.sum(nsc_map_slices*ds,axis=0)
+
+    return(val)
+
+
+
+@nb.njit(float64[:,:](float64[:,:,:],float64[:,:,:],float64[:,:,:],
+                      float64,
+                      float64,float64,float64,
+                      float64,float64,float64,
+                      float64,float64,
+                      float64,float64,
+                      float64,float64,float64,
+                      bool_),fastmath=True,parallel=True)
+def Nuclear_Stellar_Cluster_function(s: np.ndarray, b: np.ndarray, l: np.ndarray,
+                                     ds: float,
+                                     x0: float, y0: float, z0: float,
+                                     xT: float, yT: float, zT: float,
+                                     phi: float, theta: float,
+                                     rho0: float, rho1: float,
+                                     R0: float, Rin: float, Rout: float,
+                                     luminosity_flag: bool):
+
+    deg2rad = pi/180.
+
+    phi = -phi*deg2rad
+    
+    # los vector
+    x = xT - s*cos(deg2rad*l)*cos(deg2rad*b)
+    y = yT - s*sin(deg2rad*l)*cos(deg2rad*b)
+    z = zT - s*sin(deg2rad*b)
+
+    # correct trafo?
+    xp = cos(phi)*cos(theta)*x + sin(phi)*y - cos(phi)*sin(theta)*z
+    yp = -sin(phi)*cos(theta)*x + cos(phi)*y + sin(phi)*sin(theta)*z
+    zp = sin(theta)*x + cos(theta)*z
+
+    Rp = sqrt(xp**2+yp**2+zp**2)
+
+    # init empty val array
+    dims = s.shape
+    nsc_slices = zeros(dims)
+
+    # need to loop over all entries
+    for i_s in range(dims[0]):
+        for i_b in range(dims[1]):
+            for i_l in range(dims[2]):
+                
+                # inside and outside
+                if Rp[i_s,i_b,i_l] <= Rin:
+                    nsc_slices[i_s,i_b,i_l] = rho0/(1+(Rp[i_s,i_b,i_l]/R0)**2)
+
+                elif (Rp[i_s,i_b,i_l] > Rin) & (Rp[i_s,i_b,i_l] <= Rout):
+                    nsc_slices[i_s,i_b,i_l] = rho1/(1+(Rp[i_s,i_b,i_l]/R0)**3)
+
+                else:
+                    nsc_slices[i_s,i_b,i_l] = 0.
+
+    
+    # flux or luminosity
+    if luminosity_flag == False:
+
+        # for map integration
+        nsc_map_slices = nsc_slices
+
+    else:
+
+        # for luminosity integration
+        nsc_map_slices = nsc_slices * s**2
+
+    # los
+    val = np.sum(nsc_map_slices*ds,axis=0)
+
+    return(val)
+
+
+
+@nb.njit(float64[:,:](float64[:,:,:],float64[:,:,:],float64[:,:,:],
+                      float64,
+                      float64,float64,float64,
+                      float64,float64,float64,
+                      float64,float64,
+                      float64,float64,float64,
+                      float64,float64,float64,float64,
+                      float64,
+                      float64, float64,
+                      bool_),fastmath=True,parallel=True)
+def Nuclear_Stellar_Disk_function(s: np.ndarray, b: np.ndarray, l: np.ndarray,
+                                  ds: float,
+                                  x0: float, y0: float, z0: float,
+                                  xT: float, yT: float, zT: float,
+                                  phi: float, theta: float,
+                                  rho0: float, rho1: float, rho2: float,
+                                  R0: float, Rin: float, Rout: float, Rmax: float,
+                                  zscl: float,
+                                  Rscut: float, zcut: float,
+                                  luminosity_flag: bool):
+
+    deg2rad = pi/180.
+
+    phi = -phi*deg2rad
+    
+    # los vector
+    x = xT - s*cos(deg2rad*l)*cos(deg2rad*b)
+    y = yT - s*sin(deg2rad*l)*cos(deg2rad*b)
+    z = zT - s*sin(deg2rad*b)
+
+    # correct trafo?
+    xp = cos(phi)*cos(theta)*x + sin(phi)*y - cos(phi)*sin(theta)*z
+    yp = -sin(phi)*cos(theta)*x + cos(phi)*y + sin(phi)*sin(theta)*z
+    zp = sin(theta)*x + cos(theta)*z
+
+    Rp = sqrt(xp**2+yp**2)
+    Rs = sqrt(Rp**2+zp**2)
+
+    # init empty val array
+    dims = s.shape
+    nsd_slices = zeros(dims)
+
+    # need to loop over all entries
+    for i_s in range(dims[0]):
+        for i_b in range(dims[1]):
+            for i_l in range(dims[2]):
+
+                if fabs(zp[i_s,i_b,i_l]) <= zcut:
+                
+                    # inside, middle, and outside
+                    if Rp[i_s,i_b,i_l] <= Rin:
+                        nsd_slices[i_s,i_b,i_l] = rho0*(Rp[i_s,i_b,i_l]/R0)**(-0.1)*exp(-fabs(zp[i_s,i_b,i_l]/zscl))*exp(-(Rs[i_s,i_b,i_l]-Rscut)**2/Rscut**2)
+                        
+                    elif (Rp[i_s,i_b,i_l] > Rin) & (Rp[i_s,i_b,i_l] <= Rout):
+                        nsd_slices[i_s,i_b,i_l] = rho1*(Rp[i_s,i_b,i_l]/R0)**(-3.5)*exp(-fabs(zp[i_s,i_b,i_l]/zscl))*exp(-(Rs[i_s,i_b,i_l]-Rscut)**2/Rscut**2)
+
+                    elif (Rp[i_s,i_b,i_l] > Rout) & (Rp[i_s,i_b,i_l] <= Rmax):
+                        nsd_slices[i_s,i_b,i_l] = rho2*(Rp[i_s,i_b,i_l]/R0)**(-10.0)*exp(-fabs(zp[i_s,i_b,i_l]/zscl))*exp(-(Rs[i_s,i_b,i_l]-Rscut)**2/Rscut**2)
+                        
+                    else:
+                        nsd_slices[i_s,i_b,i_l] = 0.
+
+                else:
+                    nsd_slices[i_s,i_b,i_l] = 0.
+    
+    # flux or luminosity
+    if luminosity_flag == False:
+
+        # for map integration
+        nsd_map_slices = nsd_slices
+
+    else:
+
+        # for luminosity integration
+        nsd_map_slices = nsd_slices * s**2
+
+    # los
+    val = np.sum(nsd_map_slices*ds,axis=0)
+
+    return(val)
+
 
